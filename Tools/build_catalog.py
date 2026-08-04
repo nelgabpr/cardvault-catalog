@@ -145,7 +145,7 @@ def main() -> int:
         page_count = (total_count + PAGE_SIZE - 1) // PAGE_SIZE
         pages: dict[int, dict] = {1: first}
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             futures = {
                 executor.submit(request_page, page, api_key): page
                 for page in range(2, page_count + 1)
