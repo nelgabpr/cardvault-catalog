@@ -1,0 +1,50 @@
+name: Update production card catalog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3,11,19 * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: production-catalog
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build validated catalog snapshot
+        env:
+          POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
+        run: |
+          python Tools/build_catalog.py \
+            --catalog CatalogHosting/catalog.json \
+            --manifest CatalogHosting/manifest.json \
+            --catalog-path catalog.json
+      - name: Add static hosting metadata
+        run: |
+          touch CatalogHosting/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: CatalogHosting
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy production catalog
+        id: deployment
+        uses: actions/deploy-pages@v4
