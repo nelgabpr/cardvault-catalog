@@ -19,6 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Download official Pokémon TCG bulk data
+        uses: actions/checkout@v6
+        with:
+          repository: PokemonTCG/pokemon-tcg-data
+          path: PokemonTCGData
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -29,7 +34,10 @@ jobs:
           python Tools/build_catalog.py \
             --catalog CatalogHosting/catalog.json \
             --manifest CatalogHosting/manifest.json \
-            --catalog-path catalog.json
+            --catalog-path catalog.json \
+            --source-directory PokemonTCGData/cards/en \
+            --sets-file PokemonTCGData/sets/en.json \
+            --enrich-prices
       - name: Add static hosting metadata
         run: |
           touch CatalogHosting/.nojekyll

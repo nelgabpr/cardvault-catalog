@@ -26,23 +26,29 @@ SET_PAGE_SIZE = 250
 SELECT = "id,name,number,rarity,types,subtypes,images,tcgplayer"
 
 
-def request_json(url: str, api_key: str | None) -> dict:
+def request_json(
+    url: str,
+    api_key: str | None,
+    *,
+    attempts: int = 5,
+    timeout: int = 60,
+) -> dict:
     request = urllib.request.Request(url)
     if api_key:
         request.add_header("X-Api-Key", api_key)
     request.add_header("User-Agent", "CardVaultAI-CatalogBuilder/1.0")
-    for attempt in range(5):
+    for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            if error.code not in {429, 500, 502, 503, 504} or attempt == 4:
+            if error.code not in {429, 500, 502, 503, 504} or attempt == attempts - 1:
                 raise
             retry_after = error.headers.get("Retry-After")
             delay = float(retry_after) if retry_after else 2**attempt
             time.sleep(min(delay, 30))
         except urllib.error.URLError:
-            if attempt == 4:
+            if attempt == attempts - 1:
                 raise
             time.sleep(2**attempt)
     raise RuntimeError(f"Unable to fetch {url}")
@@ -61,6 +67,63 @@ def request_sets(api_key: str | None) -> dict[str, dict]:
     if len(sets) != total_count:
         raise RuntimeError(f"Expected {total_count} sets, received {len(sets)}")
     return {str(card_set["id"]): card_set for card_set in sets}
+
+
+def request_set_prices(set_id: str, api_key: str | None) -> dict[str, dict]:
+    query = urllib.parse.urlencode(
+        {
+            "q": f"set.id:{set_id}",
+            "page": 1,
+            "pageSize": 250,
+            "select": "id,tcgplayer",
+        }
+    )
+    first = request_json(f"{API_URL}?{query}", api_key, attempts=2, timeout=25)
+    pages = [first]
+    page_count = (int(first["totalCount"]) + 249) // 250
+    for page in range(2, page_count + 1):
+        page_query = urllib.parse.urlencode(
+            {
+                "q": f"set.id:{set_id}",
+                "page": page,
+                "pageSize": 250,
+                "select": "id,tcgplayer",
+            }
+        )
+        pages.append(request_json(f"{API_URL}?{page_query}", api_key, attempts=2, timeout=25))
+    return {
+        str(card["id"]): card.get("tcgplayer") or {}
+        for response in pages
+        for card in response["data"]
+    }
+
+
+def enrich_tcgplayer_prices(raw_cards: list[dict], set_ids: list[str], api_key: str | None) -> int:
+    prices_by_id: dict[str, dict] = {}
+    failed_sets: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {
+            executor.submit(request_set_prices, set_id, api_key): set_id
+            for set_id in set_ids
+        }
+        for completed, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            set_id = futures[future]
+            try:
+                prices_by_id.update(future.result())
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+                failed_sets.append(set_id)
+            print(f"Fetched prices for {completed}/{len(set_ids)} sets", file=sys.stderr)
+
+    for raw in raw_cards:
+        tcgplayer = prices_by_id.get(str(raw["id"]))
+        if tcgplayer:
+            raw["tcgplayer"] = tcgplayer
+    if failed_sets:
+        print(
+            f"Pricing unavailable for {len(failed_sets)} sets; existing app prices will be preserved",
+            file=sys.stderr,
+        )
+    return sum(1 for raw in raw_cards if raw.get("tcgplayer"))
 
 
 def normalize_card(raw: dict, sets_by_id: dict[str, dict] | None = None) -> dict:
@@ -121,6 +184,8 @@ def main() -> int:
     parser.add_argument("--catalog-path", default="LocalCardCatalog.json")
     parser.add_argument("--source-directory", type=pathlib.Path)
     parser.add_argument("--source-catalog", type=pathlib.Path)
+    parser.add_argument("--sets-file", type=pathlib.Path)
+    parser.add_argument("--enrich-prices", action="store_true")
     args = parser.parse_args()
 
     if args.source_directory and args.source_catalog:
@@ -136,7 +201,19 @@ def main() -> int:
             raise RuntimeError("No JSON card files were found in the source directory")
         raw_cards = [raw for path in source_files for raw in json.loads(path.read_text())]
         total_count = len(raw_cards)
-        sets_by_id = None
+        if args.sets_file:
+            raw_sets = json.loads(args.sets_file.read_text())
+            sets_by_id = {str(card_set["id"]): card_set for card_set in raw_sets}
+        else:
+            sets_by_id = None
+        if args.enrich_prices:
+            set_ids = sorted(sets_by_id or {str(raw["id"]).rsplit("-", 1)[0]: {} for raw in raw_cards})
+            priced_count = enrich_tcgplayer_prices(
+                raw_cards,
+                set_ids,
+                os.environ.get("POKEMON_TCG_API_KEY"),
+            )
+            print(f"Enriched {priced_count}/{total_count} cards with market data", file=sys.stderr)
     else:
         api_key = os.environ.get("POKEMON_TCG_API_KEY")
         sets_by_id = request_sets(api_key)
