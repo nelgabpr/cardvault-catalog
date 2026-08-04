@@ -18,11 +18,12 @@ import urllib.request
 
 API_URL = "https://api.pokemontcg.io/v2/cards"
 SETS_API_URL = "https://api.pokemontcg.io/v2/sets"
-PAGE_SIZE = 250
+PAGE_SIZE = 100
+SET_PAGE_SIZE = 250
 # Requesting the nested `set` object through the cards collection endpoint can
 # fail or return incomplete data. Fetch compact card rows and join official set
 # metadata separately by the stable set prefix in each card ID.
-SELECT = "id,name,number,rarity,types,subtypes,images,tcgplayer,cardmarket"
+SELECT = "id,name,number,rarity,types,subtypes,images,tcgplayer"
 
 
 def request_json(url: str, api_key: str | None) -> dict:
@@ -53,7 +54,7 @@ def request_page(page: int, api_key: str | None) -> dict:
 
 
 def request_sets(api_key: str | None) -> dict[str, dict]:
-    query = urllib.parse.urlencode({"page": 1, "pageSize": PAGE_SIZE})
+    query = urllib.parse.urlencode({"page": 1, "pageSize": SET_PAGE_SIZE})
     response = request_json(f"{SETS_API_URL}?{query}", api_key)
     total_count = int(response["totalCount"])
     sets = response["data"]
