@@ -252,6 +252,9 @@ def main() -> int:
             return 0
 
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    image_count = sum(bool(card.get("imageURL")) for card in cards)
+    priced_count = sum(card.get("marketPrice") is not None for card in cards)
+    languages = sorted({str(card.get("language") or "English") for card in cards})
     manifest = {
         "schemaVersion": 1,
         "catalogVersion": now.strftime("%Y.%m.%d.%H%M"),
@@ -260,8 +263,12 @@ def main() -> int:
         "sha256": digest,
         "minimumAppVersion": "1.0",
         "catalogPath": args.catalog_path,
-        "source": "Pokémon TCG API V2",
+        "source": "Pokemon TCG Data + Pokemon TCG API V2",
         "sourceRevision": now.isoformat().replace("+00:00", "Z"),
+        "imageCardCount": image_count,
+        "pricedCardCount": priced_count,
+        "pricingSource": "TCGplayer market",
+        "languages": languages,
     }
 
     args.catalog.parent.mkdir(parents=True, exist_ok=True)
