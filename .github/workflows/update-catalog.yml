@@ -3,7 +3,7 @@ name: Update production card catalog
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 3,15 * * *"
+    - cron: "17 3,11,19 * * *"
 
 permissions:
   contents: read

@@ -145,13 +145,35 @@ def normalize_card(raw: dict, sets_by_id: dict[str, dict] | None = None) -> dict
 
     tcgplayer = raw.get("tcgplayer") or {}
     price_groups = tcgplayer.get("prices") or {}
-    preferred_price_keys = ("holofoil", "reverseHolofoil", "normal", "1stEditionHolofoil", "unlimitedHolofoil")
+    rarity = str(raw.get("rarity") or raw.get("variant") or "").lower()
+    premium_rarity = any(
+        marker in rarity
+        for marker in ("holo", "illustration", "ultra", "secret", "rainbow", "shiny", "full art")
+    )
+    preferred_price_keys = (
+        ("holofoil", "reverseHolofoil", "normal", "1stEditionHolofoil", "unlimitedHolofoil")
+        if premium_rarity
+        else ("normal", "reverseHolofoil", "holofoil", "1stEditionNormal", "1stEditionHolofoil", "unlimited")
+    )
+    remaining_price_keys = tuple(sorted(set(price_groups) - set(preferred_price_keys)))
+    ordered_price_keys = preferred_price_keys + remaining_price_keys
+    price_options = []
     market_price = None
-    for price_key in preferred_price_keys:
-        candidate = (price_groups.get(price_key) or {}).get("market")
-        if isinstance(candidate, (int, float)) and candidate >= 0:
-            market_price = round(float(candidate), 2)
-            break
+    price_finish = None
+    supported_fields = ("low", "mid", "high", "market", "directLow")
+    for price_key in ordered_price_keys:
+        raw_option = price_groups.get(price_key) or {}
+        option = {"finish": price_key}
+        for field in supported_fields:
+            candidate = raw_option.get(field)
+            if isinstance(candidate, (int, float)) and candidate >= 0:
+                option[field] = round(float(candidate), 2)
+        if len(option) == 1:
+            continue
+        price_options.append(option)
+        if market_price is None and option.get("market") is not None:
+            market_price = option["market"]
+            price_finish = price_key
     images = raw.get("images") or {}
 
     card = {
@@ -172,6 +194,11 @@ def normalize_card(raw: dict, sets_by_id: dict[str, dict] | None = None) -> dict
     if market_price is not None:
         card["marketPrice"] = market_price
         card["priceSource"] = "TCGplayer market"
+        card["priceFinish"] = price_finish
+    if price_options:
+        card["priceOptions"] = price_options
+    if tcgplayer.get("url"):
+        card["pricingURL"] = str(tcgplayer["url"])
     if tcgplayer.get("updatedAt"):
         card["priceUpdatedAt"] = str(tcgplayer["updatedAt"])
     return card
@@ -254,6 +281,7 @@ def main() -> int:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     image_count = sum(bool(card.get("imageURL")) for card in cards)
     priced_count = sum(card.get("marketPrice") is not None for card in cards)
+    price_option_count = sum(len(card.get("priceOptions") or []) for card in cards)
     languages = sorted({str(card.get("language") or "English") for card in cards})
     manifest = {
         "schemaVersion": 1,
@@ -267,7 +295,8 @@ def main() -> int:
         "sourceRevision": now.isoformat().replace("+00:00", "Z"),
         "imageCardCount": image_count,
         "pricedCardCount": priced_count,
-        "pricingSource": "TCGplayer market",
+        "priceOptionCount": price_option_count,
+        "pricingSource": "TCGplayer market by finish",
         "languages": languages,
     }
 
