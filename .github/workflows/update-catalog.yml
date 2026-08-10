@@ -2,8 +2,16 @@ name: Update production card catalog
 
 on:
   workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: "Run full price enrichment even when source data is unchanged"
+        required: true
+        type: boolean
+        default: true
   schedule:
-    - cron: "17 3,11,19 * * *"
+    # Check the free identity/artwork source hourly. Full price enrichment stays
+    # at 03:17, 11:17, and 19:17 UTC to remain below the no-key API allowance.
+    - cron: "17 * * * *"
 
 permissions:
   contents: read
@@ -15,7 +23,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.cadence.outputs.should_build }}
+      enrich_prices: ${{ steps.cadence.outputs.enrich_prices }}
+    steps:
+      - name: Decide whether source or prices are due
+        id: cadence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hour="$(date -u +%H)"
+          enrich_prices=false
+          if { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full_refresh }}" = "true" ]; } || [ "$hour" = "03" ] || [ "$hour" = "11" ] || [ "$hour" = "19" ]; then
+            enrich_prices=true
+          fi
+
+          upstream_revision="$(curl --fail --silent --show-error --retry 4 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/PokemonTCG/pokemon-tcg-data/commits/master | jq -r .sha)"
+          current_revision="$(curl --fail --silent --show-error --retry 4 \
+            https://nelgabpr.github.io/cardvault-catalog/manifest.json 2>/dev/null | jq -r '.sourceRevision // ""' || true)"
+
+          should_build=false
+          if [ "$enrich_prices" = "true" ] || [ "$upstream_revision" != "$current_revision" ]; then
+            should_build=true
+          fi
+          echo "enrich_prices=$enrich_prices" >> "$GITHUB_OUTPUT"
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "Hourly check: upstream=$upstream_revision current=$current_revision prices=$enrich_prices build=$should_build"
+
   build:
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -41,15 +83,20 @@ jobs:
       - name: Build validated catalog snapshot
         env:
           POKEMON_TCG_API_KEY: ${{ secrets.POKEMON_TCG_API_KEY }}
+          ENRICH_PRICES: ${{ needs.decide.outputs.enrich_prices }}
         run: |
           source_revision="$(git -C PokemonTCGData rev-parse HEAD)"
+          price_arguments=()
+          if [ "$ENRICH_PRICES" = "true" ]; then
+            price_arguments+=(--enrich-prices)
+          fi
           python Tools/build_catalog.py \
             --catalog CatalogHosting/catalog.json \
             --manifest CatalogHosting/manifest.json \
             --catalog-path catalog.json \
             --source-directory PokemonTCGData/cards/en \
             --sets-file PokemonTCGData/sets/en.json \
-            --enrich-prices \
+            "${price_arguments[@]}" \
             --source-revision "$source_revision" \
             --previous-catalog /tmp/cardvault-previous/catalog.json \
             --health-report CatalogHosting/health.json

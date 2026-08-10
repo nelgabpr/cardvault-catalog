@@ -1,7 +1,10 @@
 # CardVault AI production catalog
 
-This directory is generated and deployed by `.github/workflows/update-catalog.yml`
-three times daily. The iOS app should point `CATALOG_MANIFEST_URL` at the deployed
+This directory is generated and deployed by `.github/workflows/update-catalog.yml`.
+The workflow checks the free identity/artwork source hourly and publishes only
+when that upstream revision changes. Full price enrichment runs three times
+daily to remain below the free no-key API allowance. The iOS app should point
+`CATALOG_MANIFEST_URL` at the deployed
 `manifest.json`. The manifest schema, version, minimum app version, SHA-256,
 card count, and Ed25519 signature are validated on-device before an atomic
 install.
