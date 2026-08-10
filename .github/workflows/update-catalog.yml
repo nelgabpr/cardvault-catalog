@@ -9,8 +9,8 @@ on:
         type: boolean
         default: true
   schedule:
-    # Check the free identity/artwork source hourly. Full price enrichment stays
-    # at 03:17, 11:17, and 19:17 UTC to remain below the no-key API allowance.
+    # Check the free identity/artwork source hourly. Full price enrichment runs
+    # only when the last successful price pull is at least eight hours old.
     - cron: "17 * * * *"
 
 permissions:
@@ -34,18 +34,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          hour="$(date -u +%H)"
-          enrich_prices=false
-          if { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full_refresh }}" = "true" ]; } || [ "$hour" = "03" ] || [ "$hour" = "11" ] || [ "$hour" = "19" ]; then
-            enrich_prices=true
-          fi
-
           upstream_revision="$(curl --fail --silent --show-error --retry 4 \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header "Accept: application/vnd.github+json" \
             https://api.github.com/repos/PokemonTCG/pokemon-tcg-data/commits/master | jq -r .sha)"
-          current_revision="$(curl --fail --silent --show-error --retry 4 \
-            https://nelgabpr.github.io/cardvault-catalog/manifest.json 2>/dev/null | jq -r '.sourceRevision // ""' || true)"
+          current_manifest="$(curl --fail --silent --show-error --retry 4 \
+            https://nelgabpr.github.io/cardvault-catalog/manifest.json 2>/dev/null || true)"
+          current_revision="$(jq -r '.sourceRevision // ""' <<< "$current_manifest" 2>/dev/null || true)"
+          last_price_refresh="$(jq -r '.priceEnrichedAt // .generatedAt // "1970-01-01T00:00:00Z"' <<< "$current_manifest" 2>/dev/null || echo '1970-01-01T00:00:00Z')"
+
+          now_epoch="$(date -u +%s)"
+          last_price_epoch="$(date -u -d "$last_price_refresh" +%s 2>/dev/null || echo 0)"
+          enrich_prices=false
+          if { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full_refresh }}" = "true" ]; } || [ $((now_epoch - last_price_epoch)) -ge 28800 ]; then
+            enrich_prices=true
+          fi
 
           should_build=false
           if [ "$enrich_prices" = "true" ] || [ "$upstream_revision" != "$current_revision" ]; then
@@ -53,7 +56,7 @@ jobs:
           fi
           echo "enrich_prices=$enrich_prices" >> "$GITHUB_OUTPUT"
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
-          echo "Hourly check: upstream=$upstream_revision current=$current_revision prices=$enrich_prices build=$should_build"
+          echo "Hourly check: upstream=$upstream_revision current=$current_revision last_price=$last_price_refresh prices=$enrich_prices build=$should_build"
 
   build:
     needs: decide
@@ -86,9 +89,12 @@ jobs:
           ENRICH_PRICES: ${{ needs.decide.outputs.enrich_prices }}
         run: |
           source_revision="$(git -C PokemonTCGData rev-parse HEAD)"
+          previous_price_refresh="$(jq -r '.priceEnrichedAt // .generatedAt' /tmp/cardvault-previous/manifest.json 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+          price_enriched_at="$previous_price_refresh"
           price_arguments=()
           if [ "$ENRICH_PRICES" = "true" ]; then
             price_arguments+=(--enrich-prices)
+            price_enriched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi
           python Tools/build_catalog.py \
             --catalog CatalogHosting/catalog.json \
@@ -98,6 +104,7 @@ jobs:
             --sets-file PokemonTCGData/sets/en.json \
             "${price_arguments[@]}" \
             --source-revision "$source_revision" \
+            --price-enriched-at "$price_enriched_at" \
             --previous-catalog /tmp/cardvault-previous/catalog.json \
             --health-report CatalogHosting/health.json
       - name: Sign catalog snapshot

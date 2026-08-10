@@ -370,6 +370,7 @@ def main() -> int:
     parser.add_argument("--health-report", type=pathlib.Path)
     parser.add_argument("--max-price-age-days", type=int, default=90)
     parser.add_argument("--source-revision")
+    parser.add_argument("--price-enriched-at")
     args = parser.parse_args()
 
     if args.source_directory and args.source_catalog:
@@ -478,6 +479,7 @@ def main() -> int:
         "healthPath": "health.json",
         "healthWarnings": health["warnings"],
         "pricingSource": "TCGplayer market by finish",
+        "priceEnrichedAt": args.price_enriched_at or now.isoformat().replace("+00:00", "Z"),
         "languages": languages,
     }
 
