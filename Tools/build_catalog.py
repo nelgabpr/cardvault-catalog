@@ -24,6 +24,15 @@ SET_PAGE_SIZE = 250
 # fail or return incomplete data. Fetch compact card rows and join official set
 # metadata separately by the stable set prefix in each card ID.
 SELECT = "id,name,number,rarity,types,subtypes,images,tcgplayer"
+PRICE_FIELDS = (
+    "marketPrice",
+    "priceSource",
+    "priceUpdatedAt",
+    "priceFinish",
+    "priceOptions",
+    "pricingURL",
+)
+IMAGE_FIELDS = ("imageURL", "largeImageURL")
 
 
 def request_json(
@@ -186,6 +195,7 @@ def normalize_card(raw: dict, sets_by_id: dict[str, dict] | None = None) -> dict
         "variant": str(raw.get("rarity") or raw.get("variant") or (subtypes[-1] if subtypes else "Standard")),
         "type": str((raw.get("types") or [raw.get("type") or "Colorless"])[0]),
         "aliases": aliases,
+        "providerIDs": {"pokemonTCG": card_id},
     }
     if images.get("small"):
         card["imageURL"] = str(images["small"])
@@ -204,6 +214,149 @@ def normalize_card(raw: dict, sets_by_id: dict[str, dict] | None = None) -> dict
     return card
 
 
+def parse_provider_date(value: str | None) -> dt.datetime | None:
+    if not value:
+        return None
+    normalized = str(value).strip().replace("/", "-")
+    if len(normalized) == 10:
+        normalized += "T00:00:00+00:00"
+    elif normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def carry_forward_last_known_good(
+    cards: list[dict],
+    previous_cards: list[dict],
+    *,
+    now: dt.datetime,
+    max_price_age_days: int,
+) -> dict[str, int]:
+    """Preserve still-relevant provider data when a refresh is incomplete.
+
+    Current provider values always win. Previous prices retain their original
+    timestamp so the app can label them stale instead of presenting them as new.
+    """
+    previous_by_id = {str(card.get("id")): card for card in previous_cards}
+    cutoff = now - dt.timedelta(days=max_price_age_days)
+    carried_price_cards = 0
+    carried_price_options = 0
+    carried_artwork_cards = 0
+
+    for card in cards:
+        previous = previous_by_id.get(str(card["id"]))
+        if not previous:
+            continue
+
+        copied_artwork = False
+        for field in IMAGE_FIELDS:
+            if not card.get(field) and previous.get(field):
+                card[field] = previous[field]
+                copied_artwork = True
+        if copied_artwork:
+            carried_artwork_cards += 1
+
+        previous_date = parse_provider_date(previous.get("priceUpdatedAt"))
+        if previous_date is None or previous_date < cutoff:
+            continue
+
+        copied_primary_price = False
+        current_options = {
+            str(option.get("finish")): option
+            for option in card.get("priceOptions") or []
+            if option.get("finish")
+        }
+        for option in previous.get("priceOptions") or []:
+            finish = str(option.get("finish") or "")
+            if finish and finish not in current_options:
+                current_options[finish] = option
+                carried_price_options += 1
+        if current_options:
+            card["priceOptions"] = list(current_options.values())
+
+        if card.get("marketPrice") is None and previous.get("marketPrice") is not None:
+            for field in PRICE_FIELDS:
+                if field == "priceOptions":
+                    continue
+                if not card.get(field) and previous.get(field) is not None:
+                    card[field] = previous[field]
+            copied_primary_price = True
+        elif not card.get("pricingURL") and previous.get("pricingURL"):
+            card["pricingURL"] = previous["pricingURL"]
+
+        if copied_primary_price:
+            carried_price_cards += 1
+
+    return {
+        "carriedForwardPriceCardCount": carried_price_cards,
+        "carriedForwardPriceOptionCount": carried_price_options,
+        "carriedForwardArtworkCardCount": carried_artwork_cards,
+    }
+
+
+def build_health_report(
+    cards: list[dict],
+    previous_cards: list[dict],
+    carry_stats: dict[str, int],
+    *,
+    generated_at: dt.datetime,
+) -> dict:
+    card_count = len(cards)
+    previous_count = len(previous_cards)
+    priced_count = sum(card.get("marketPrice") is not None for card in cards)
+    fresh_priced_count = max(0, priced_count - carry_stats["carriedForwardPriceCardCount"])
+    artwork_count = sum(bool(card.get("imageURL") or card.get("largeImageURL")) for card in cards)
+    previous_priced_count = sum(card.get("marketPrice") is not None for card in previous_cards)
+    previous_artwork_count = sum(
+        bool(card.get("imageURL") or card.get("largeImageURL")) for card in previous_cards
+    )
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    if previous_count and card_count < previous_count * 0.95:
+        errors.append(
+            f"Card count fell from {previous_count} to {card_count}, exceeding the 5% safety limit."
+        )
+    if previous_artwork_count and artwork_count < previous_artwork_count * 0.98:
+        errors.append(
+            f"Artwork coverage fell from {previous_artwork_count} to {artwork_count}."
+        )
+    if previous_priced_count:
+        previous_coverage = previous_priced_count / max(previous_count, 1)
+        current_coverage = priced_count / max(card_count, 1)
+        if current_coverage + 0.02 < previous_coverage:
+            errors.append(
+                "Price coverage fell by more than two percentage points after last-known-good merging."
+            )
+    if carry_stats["carriedForwardPriceCardCount"] or carry_stats["carriedForwardPriceOptionCount"]:
+        warnings.append(
+            "Preserved last-known provider data after an incomplete refresh: "
+            f"{carry_stats['carriedForwardPriceCardCount']} primary card prices and "
+            f"{carry_stats['carriedForwardPriceOptionCount']} finish-specific options."
+        )
+
+    return {
+        "status": "failed" if errors else ("degraded" if warnings else "healthy"),
+        "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
+        "cardCount": card_count,
+        "previousCardCount": previous_count,
+        "artworkCardCount": artwork_count,
+        "freshPricedCardCount": fresh_priced_count,
+        "pricedCardCount": priced_count,
+        "priceCoveragePercent": round(priced_count / max(card_count, 1) * 100, 2),
+        "priceOptionCount": sum(len(card.get("priceOptions") or []) for card in cards),
+        **carry_stats,
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", required=True, type=pathlib.Path)
@@ -213,6 +366,10 @@ def main() -> int:
     parser.add_argument("--source-catalog", type=pathlib.Path)
     parser.add_argument("--sets-file", type=pathlib.Path)
     parser.add_argument("--enrich-prices", action="store_true")
+    parser.add_argument("--previous-catalog", type=pathlib.Path)
+    parser.add_argument("--health-report", type=pathlib.Path)
+    parser.add_argument("--max-price-age-days", type=int, default=90)
+    parser.add_argument("--source-revision")
     args = parser.parse_args()
 
     if args.source_directory and args.source_catalog:
@@ -260,6 +417,11 @@ def main() -> int:
                 print(f"Fetched {completed}/{page_count} pages", file=sys.stderr)
         raw_cards = [raw for page in range(1, page_count + 1) for raw in pages[page]["data"]]
 
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    previous_cards: list[dict] = []
+    if args.previous_catalog and args.previous_catalog.exists():
+        previous_cards = json.loads(args.previous_catalog.read_text())
+
     cards = [normalize_card(raw, sets_by_id) for raw in raw_cards]
     cards.sort(key=lambda card: card["id"])
     if len(cards) != total_count or len({card["id"] for card in cards}) != len(cards):
@@ -270,21 +432,32 @@ def main() -> int:
             sample = ", ".join(missing_sets[:5])
             raise RuntimeError(f"Set metadata missing for {len(missing_sets)} cards: {sample}")
 
+    carry_stats = carry_forward_last_known_good(
+        cards,
+        previous_cards,
+        now=now,
+        max_price_age_days=args.max_price_age_days,
+    )
+    health = build_health_report(
+        cards,
+        previous_cards,
+        carry_stats,
+        generated_at=now,
+    )
+    if args.health_report:
+        args.health_report.parent.mkdir(parents=True, exist_ok=True)
+        args.health_report.write_text(json.dumps(health, indent=2) + "\n")
+    if health["errors"]:
+        raise RuntimeError("Catalog health validation failed: " + " ".join(health["errors"]))
+
     catalog_data = json.dumps(cards, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     digest = hashlib.sha256(catalog_data).hexdigest()
-    if args.manifest.exists():
-        existing = json.loads(args.manifest.read_text())
-        if existing.get("sha256") == digest:
-            print(f"Catalog unchanged: {len(cards)} cards, SHA-256 {digest}")
-            return 0
-
-    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-    image_count = sum(bool(card.get("imageURL")) for card in cards)
+    image_count = sum(bool(card.get("imageURL") or card.get("largeImageURL")) for card in cards)
     priced_count = sum(card.get("marketPrice") is not None for card in cards)
     price_option_count = sum(len(card.get("priceOptions") or []) for card in cards)
     languages = sorted({str(card.get("language") or "English") for card in cards})
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "catalogVersion": now.strftime("%Y.%m.%d.%H%M"),
         "generatedAt": now.isoformat().replace("+00:00", "Z"),
         "cardCount": len(cards),
@@ -292,10 +465,18 @@ def main() -> int:
         "minimumAppVersion": "1.0",
         "catalogPath": args.catalog_path,
         "source": "Pokemon TCG Data + Pokemon TCG API V2",
-        "sourceRevision": now.isoformat().replace("+00:00", "Z"),
+        "identitySource": "PokemonTCG/pokemon-tcg-data",
+        "artworkSource": "Pokemon TCG API image URLs",
+        "sourceRevision": args.source_revision or now.isoformat().replace("+00:00", "Z"),
         "imageCardCount": image_count,
         "pricedCardCount": priced_count,
         "priceOptionCount": price_option_count,
+        "freshPricedCardCount": health["freshPricedCardCount"],
+        "carriedForwardPricedCardCount": health["carriedForwardPriceCardCount"],
+        "carriedForwardArtworkCardCount": health["carriedForwardArtworkCardCount"],
+        "healthStatus": health["status"],
+        "healthPath": "health.json",
+        "healthWarnings": health["warnings"],
         "pricingSource": "TCGplayer market by finish",
         "languages": languages,
     }
