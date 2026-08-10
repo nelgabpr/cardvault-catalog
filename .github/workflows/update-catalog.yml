@@ -2,6 +2,12 @@ name: Update production card catalog
 
 on:
   workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: "Run full price enrichment even when source data is unchanged"
+        required: true
+        type: boolean
+        default: true
   schedule:
     # Check the free identity/artwork source hourly. Full price enrichment stays
     # at 03:17, 11:17, and 19:17 UTC to remain below the no-key API allowance.
@@ -30,7 +36,7 @@ jobs:
         run: |
           hour="$(date -u +%H)"
           enrich_prices=false
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$hour" = "03" ] || [ "$hour" = "11" ] || [ "$hour" = "19" ]; then
+          if { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.full_refresh }}" = "true" ]; } || [ "$hour" = "03" ] || [ "$hour" = "11" ] || [ "$hour" = "19" ]; then
             enrich_prices=true
           fi
 
