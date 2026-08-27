@@ -8,18 +8,23 @@
 </head>
 <body><main>
   <h1>CardVault AI Privacy Policy</h1>
-  <p class="muted">Effective August 5, 2026</p>
+  <p class="muted">Effective August 20, 2026</p>
   <p>CardVault AI is designed as an offline-first collection tool. Card scans and recognition are processed on the device.</p>
   <h2>Data stored by the app</h2>
   <p>The app stores collection records, wishlist records, notes, purchase information, card images, and cached market estimates on the device using Apple SwiftData.</p>
   <h2>Network activity</h2>
-  <p>CardVault AI connects to the internet to download validated catalog updates, card artwork, and catalog-supplied market estimates. Captured card photographs are not sent to the catalog service or a recognition server.</p>
+  <p>CardVault AI connects to the internet to obtain a short-lived catalog access token and download signed catalog updates. The hosting provider receives ordinary network metadata such as IP address, request time, app version, and HTTP headers for security and rate limiting. The app does not send your scans, collection, email, Apple ID, or advertising identifier with this request.</p>
+  <p>Official artwork may be requested from provider image hosts only when enabled by a signed remote setting. Captured card photographs are not sent to the catalog service, artwork host, pricing provider, or a recognition server.</p>
   <h2>Tracking and advertising</h2>
   <p>CardVault AI does not include advertising SDKs and does not track users across apps or websites. The current release does not collect developer analytics events.</p>
+  <h2>Purchases</h2>
+  <p>If subscriptions are enabled, purchases are processed by Apple through StoreKit. The app checks signed App Store transaction entitlements to determine access. CardVault AI does not receive or store your full payment-card number.</p>
+  <h2>Optional iCloud synchronization</h2>
+  <p>When an entitled build enables iCloud synchronization, Apple CloudKit stores vault records and captured images in the private database associated with the signed-in Apple Account. CardVault AI does not receive the user’s Apple Account password. Builds that show iCloud as disabled keep the vault on the device unless the user exports a backup.</p>
   <h2>Backups and deletion</h2>
-  <p>Users may export a JSON vault backup. Exported files are controlled by the user and may contain collection details and card images. Individual entries can be deleted inside the app. Deleting the app removes local data; exported backups must be deleted separately.</p>
+  <p>Users may export a JSON vault backup. Exported files are controlled by the user and may contain collection details and captured card images. Downloaded provider catalogs and artwork caches are excluded from exports and device backups. Individual entries can be deleted inside the app. Deleting the app removes local data; exported backups must be deleted separately.</p>
   <h2>Contact</h2>
-  <p>Support is available through the <a href="support.html">CardVault AI support page</a>.</p>
+  <p>Support is available through the <a href="support.html">CardVault AI support page</a>. See the <a href="terms.html">Terms of Use</a> for service and subscription terms.</p>
   <p class="muted">Pokémon and Pokémon character names are trademarks of Nintendo, Creatures Inc., and GAME FREAK inc. CardVault AI is independent and is not affiliated with or endorsed by them.</p>
 </main></body>
 </html>
