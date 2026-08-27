@@ -1,0 +1,95 @@
+name: Publish static catalog pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: production-catalog
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Preserve the current catalog and add the latest static pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://nelgabpr.github.io/cardvault-catalog"
+          output="/tmp/cardvault-pages"
+          mkdir -p "$output"
+
+          cp CatalogHosting/index.html "$output/index.html"
+          cp CatalogHosting/privacy.html "$output/privacy.html"
+          cp CatalogHosting/support.html "$output/support.html"
+          cp CatalogHosting/terms.html "$output/terms.html"
+          touch "$output/.nojekyll"
+
+          curl --fail --location --retry 8 --retry-delay 5 \
+            "$base/manifest.json" --output "$output/manifest.json"
+          curl --fail --location --retry 8 --retry-delay 5 \
+            "$base/health.json" --output "$output/health.json"
+
+          catalog_path="$(jq -r .catalogPath "$output/manifest.json")"
+          case "$catalog_path" in
+            ""|/*|*..*|*\\*) echo "Unsafe catalog path: $catalog_path" >&2; exit 1 ;;
+          esac
+          mkdir -p "$output/$(dirname "$catalog_path")"
+          curl --fail --location --retry 8 --retry-delay 5 \
+            "$base/$catalog_path" --output "$output/$catalog_path"
+          cp "$output/$catalog_path" "$output/catalog.json"
+
+          expected="$(jq -r .sha256 "$output/manifest.json")"
+          actual="$(sha256sum "$output/$catalog_path" | cut -d' ' -f1)"
+          test -n "$expected"
+          test "$expected" = "$actual"
+
+          if curl --fail --location --retry 4 --retry-delay 3 \
+            "$base/rollback-manifest.json" --output "$output/rollback-manifest.json"; then
+            rollback_path="$(jq -r .catalogPath "$output/rollback-manifest.json")"
+            case "$rollback_path" in
+              ""|/*|*..*|*\\*) echo "Unsafe rollback path: $rollback_path" >&2; exit 1 ;;
+            esac
+            mkdir -p "$output/$(dirname "$rollback_path")"
+            curl --fail --location --retry 8 --retry-delay 5 \
+              "$base/$rollback_path" --output "$output/$rollback_path"
+            rollback_expected="$(jq -r .sha256 "$output/rollback-manifest.json")"
+            rollback_actual="$(sha256sum "$output/$rollback_path" | cut -d' ' -f1)"
+            test "$rollback_expected" = "$rollback_actual"
+          else
+            rm -f "$output/rollback-manifest.json"
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: /tmp/cardvault-pages
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: stage
+    steps:
+      - name: Deploy catalog and static pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Verify legal and support pages
+        run: |
+          base="https://nelgabpr.github.io/cardvault-catalog"
+          for page in privacy support terms; do
+            curl --fail --location --retry 8 --retry-delay 5 \
+              "$base/$page.html" --output "/tmp/$page.html"
+            grep -q 'CardVault AI' "/tmp/$page.html"
+          done
